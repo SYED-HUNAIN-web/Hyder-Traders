@@ -1,0 +1,96 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // GLOBAL SECURITY HELPERS
+    // ==========================================
+
+    // Checks if the request comes from an authenticated user
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Checks if the authenticated user matches the target resource owner ID
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Checks if the authenticated user holds an active administrative role
+    function isAdmin() {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // Verifies that the authenticated user profile is not marked as blocked
+    function isNotBlocked() {
+      return !isAuthenticated() || 
+        !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.blocked != true;
+    }
+
+    // ==========================================
+    // 1. PRODUCTS COLLECTION SECURITY
+    // ==========================================
+    match /products/{productId} {
+      // Anyone can browse products (public read)
+      allow read: if true;
+      
+      // Only authorized administrator accounts can modify product catalog listings
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 2. USERS COLLECTION SECURITY
+    // ==========================================
+    match /users/{userId} {
+      // Users can only view their own account profile. Admins have complete visibility.
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Any authenticated user can create their initial profile card upon signup
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      
+      // Users can modify their profile only if they are not blocked. Admins can override and change roles/states.
+      allow update: if (isOwner(userId) && isNotBlocked()) || isAdmin();
+      
+      // Only system administrators can delete accounts
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 3. ORDERS COLLECTION SECURITY
+    // ==========================================
+    match /orders/{orderId} {
+      // Users can view only their own orders. Admins can view all orders placed in the system.
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      
+      // Order placement security:
+      // - The purchasing account must not be blocked.
+      // - If registered: order userId must match their authenticated user UID.
+      // - If guest: order userId must be explicitly set to 'guest'.
+      allow create: if isNotBlocked() && (
+        (isAuthenticated() && request.resource.data.userId == request.auth.uid) ||
+        (!isAuthenticated() && request.resource.data.userId == 'guest')
+      );
+      
+      // Only admins can adjust order status badges or delete records
+      allow update, delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 4. REVIEWS COLLECTION SECURITY
+    // ==========================================
+    match /reviews/{reviewId} {
+      // Product reviews are publicly viewable by visitors and customers
+      allow read: if true;
+      
+      // Authentic, non-blocked customers can submit new reviews, linked directly to their UID
+      allow create: if isAuthenticated() && isNotBlocked() && request.resource.data.userId == request.auth.uid;
+      
+      // Reviewers can edit or delete their own feedback cards. Admins hold overall moderation rights.
+      allow update, delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+  }
+}
